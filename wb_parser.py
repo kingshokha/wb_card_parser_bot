@@ -1,5 +1,6 @@
 import re
 import logging
+import asyncio
 import aiohttp
 from config import WB_SELLER_TOKEN
 
@@ -28,7 +29,7 @@ def extract_article(text: str) -> int | None:
     return None
 
 def get_basket_host(vol: int) -> str:
-    """Определяет домен basket-XX на основе значения vol."""
+    """Определяет стартовый домен basket-XX на основе значения vol."""
     if 0 <= vol <= 143: return "basket-01.wbbasket.ru"
     elif 144 <= vol <= 287: return "basket-02.wbbasket.ru"
     elif 288 <= vol <= 431: return "basket-03.wbbasket.ru"
@@ -49,7 +50,7 @@ def get_basket_host(vol: int) -> str:
     elif 2838 <= vol <= 3053: return "basket-18.wbbasket.ru"
     elif 3054 <= vol <= 3269: return "basket-19.wbbasket.ru"
     elif 3270 <= vol <= 3485: return "basket-20.wbbasket.ru"
-    else: return "basket-21.wbbasket.ru"
+    else: return f"basket-{(vol // 200) + 1:02d}.wbbasket.ru"
 
 async def get_subject_id_by_name(subj_name: str) -> int:
     """Ищет subjectID по названию категории в WB Content API."""
@@ -78,7 +79,7 @@ async def get_subject_id_by_name(subj_name: str) -> int:
 async def fetch_wb_card(article: int) -> dict | None:
     """
     Универсальный парсер карточек Wildberries.
-    Гарантирует получение данных строго по запрошенному артикулу.
+    Использует параллельный сканер по корзинам 01..80 для мгновенного поиска любых новых товаров.
     """
     logger.info(f"Начало парсинга товара по артикулу: {article}")
     vol = article // 100000
@@ -90,38 +91,46 @@ async def fetch_wb_card(article: int) -> dict | None:
         "Accept-Language": "ru-RU,ru;q=0.9"
     }
 
-    product_info = {}
     card_data = None
-    working_basket = get_basket_host(vol)
+    working_basket = None
 
     async with aiohttp.ClientSession(headers=headers) as session:
-        # Стратегия 1: Прямой запрос к CDN card.json по рассчитанному домену
-        cdn_url = f"https://{working_basket}/vol{vol}/part{part}/{article}/info/ru/card.json"
+        # Быстрая функция проверки корзины
+        async def check_basket(b_num: int):
+            b_host = f"basket-{b_num:02d}.wbbasket.ru"
+            cdn_url = f"https://{b_host}/vol{vol}/part{part}/{article}/info/ru/card.json"
+            try:
+                async with session.get(cdn_url, timeout=2.5) as resp:
+                    if resp.status == 200:
+                        c_json = await resp.json()
+                        return c_json, b_host
+            except Exception:
+                pass
+            return None, None
+
+        # 1. Попытка на расчетном сервере
+        calc_host = get_basket_host(vol)
+        c_url = f"https://{calc_host}/vol{vol}/part{part}/{article}/info/ru/card.json"
         try:
-            async with session.get(cdn_url, timeout=3) as resp:
+            async with session.get(c_url, timeout=2) as resp:
                 if resp.status == 200:
                     card_data = await resp.json()
-                    logger.info(f"Карточка {article} найдена на основном сервере {working_basket}")
-        except Exception as e:
-            logger.debug(f"Ошибка получения {cdn_url}: {e}")
+                    working_basket = calc_host
+        except Exception:
+            pass
 
-        # Стратегия 2: Если прямой basket не сработал — перебираем сервера 01..25
+        # 2. Если на расчетном не нашли — сканируем параллельно серверы 01..80
         if not card_data:
-            for b_num in range(1, 26):
-                b_host = f"basket-{b_num:02d}.wbbasket.ru"
-                alt_cdn_url = f"https://{b_host}/vol{vol}/part{part}/{article}/info/ru/card.json"
-                try:
-                    async with session.get(alt_cdn_url, timeout=2) as resp:
-                        if resp.status == 200:
-                            card_data = await resp.json()
-                            working_basket = b_host
-                            logger.info(f"Карточка {article} найдена на резервном сервере {working_basket}")
-                            break
-                except Exception:
-                    pass
+            tasks = [check_basket(i) for i in range(1, 81)]
+            results = await asyncio.gather(*tasks)
+            for c_json, b_host in results:
+                if c_json:
+                    card_data = c_json
+                    working_basket = b_host
+                    break
 
         if not card_data:
-            logger.error(f"Не удалось найти данные товара {article} ни на одном сервере CDN WB.")
+            logger.error(f"Не удалось найти данные товара {article} ни на одном сервере CDN WB (1..80).")
             return None
 
         # Сбор основных полей из card.json
@@ -145,6 +154,7 @@ async def fetch_wb_card(article: int) -> dict | None:
             except Exception:
                 break
 
+        product_info = {}
         product_info["article"] = article
         product_info["name"] = name
         product_info["subj_name"] = subj_name
@@ -164,5 +174,5 @@ async def fetch_wb_card(article: int) -> dict | None:
 
         product_info["sizes"] = [{"tech_size": "0", "wb_size": "", "orig_price": 1000}]
 
-    logger.info(f"Успешно спарсен товар: '{name}', Категория: '{subj_name}', Артикул: {article}")
+    logger.info(f"Успешно спарсен товар: '{name}', Категория: '{subj_name}', Сервер CDN: {working_basket}")
     return product_info
