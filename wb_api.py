@@ -94,22 +94,25 @@ async def get_category_characteristics(subject_id: int) -> list[dict]:
     
     return []
 
-def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) -> tuple[list[dict], dict]:
+def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) -> tuple[list[dict], dict, list[dict]]:
     """
     Сопоставляет характеристики донора с официальным справочником WB.
     1. Заполняет блок dimensions (длина, ширина, высота).
     2. Исключает характеристики габаритов и веса из массива characteristics.
-    3. Исключает характеристики с maxCount == 0 (заблокированные/недоступные WB).
+    3. Отслеживает и отдельно возвращает характеристики с maxCount == 0 (skipped_charcs).
     4. Для остальных числовых характеристик (charcType == 4) строго передает числа (int/float).
     """
-    charc_lookup = {}
+    all_cat_lookup = {}
+    valid_cat_lookup = {}
     for c in category_charcs:
         c_name = c.get("name", "").strip().lower()
-        # Пропускаем характеристики, для которых WB запрещает ввод (maxCount == 0)
-        if c_name and c.get("maxCount", 1) > 0:
-            charc_lookup[c_name] = c
+        if c_name:
+            all_cat_lookup[c_name] = c
+            if c.get("maxCount", 1) > 0:
+                valid_cat_lookup[c_name] = c
 
     mapped_charcs = []
+    skipped_charcs = []
     dimensions = {"length": 10, "width": 10, "height": 10}
 
     DIM_WEIGHT_KEYWORDS = ["длина", "ширина", "высота", "глубина", "вес"]
@@ -136,8 +139,17 @@ def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) 
         if any(kw in name_lower for kw in DIM_WEIGHT_KEYWORDS):
             continue
 
-        if name_lower in charc_lookup:
-            charc_info = charc_lookup[name_lower]
+        # Если характеристика есть в категории, но у неё maxCount == 0 (WB запретил ввод)
+        if name_lower in all_cat_lookup and name_lower not in valid_cat_lookup:
+            val_str = ", ".join(raw_val) if isinstance(raw_val, list) else str(raw_val)
+            skipped_charcs.append({
+                "name": raw_name,
+                "value": val_str
+            })
+            continue
+
+        if name_lower in valid_cat_lookup:
+            charc_info = valid_cat_lookup[name_lower]
             charc_id = charc_info.get("charcID")
             charc_type = charc_info.get("charcType", 1)
 
@@ -162,18 +174,19 @@ def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) 
                     "value": vals
                 })
 
-    return mapped_charcs, dimensions
+    return mapped_charcs, dimensions, skipped_charcs
 
-async def upload_card(product_info: dict, vendor_code: str) -> tuple[bool, str]:
+async def upload_card(product_info: dict, vendor_code: str) -> tuple[bool, str, list[dict]]:
     """
     Создает новую карточку товара в кабинете продавца через WB Content API v2.
+    Возвращает (успех, сообщение, пропущенные_характеристики).
     """
     subject_id = product_info.get("subject_id", 105)
 
     category_charcs = await get_category_characteristics(subject_id)
     donor_options = product_info.get("options", [])
     
-    mapped_charcs, dimensions = map_characteristics(donor_options, category_charcs)
+    mapped_charcs, dimensions, skipped_charcs = map_characteristics(donor_options, category_charcs)
 
     parsed_sizes = product_info.get("sizes", [])
     sizes_count = max(1, len(parsed_sizes))
@@ -219,13 +232,13 @@ async def upload_card(product_info: dict, vendor_code: str) -> tuple[bool, str]:
             async with session.post(url, headers=get_headers(), json=payload, timeout=15) as resp:
                 resp_data = await resp.json()
                 if resp.status in (200, 201) and not resp_data.get("error"):
-                    return True, f"Карточка создана!"
+                    return True, "Карточка создана!", skipped_charcs
                 else:
                     error_msg = resp_data.get("errorText") or resp_data.get("additionalErrors") or str(resp_data)
-                    return False, f"Ошибка от WB API: {error_msg}"
+                    return False, f"Ошибка от WB API: {error_msg}", skipped_charcs
     except Exception as e:
         logger.exception("Ошибка при отправке карточки в WB Content API")
-        return False, f"Исключение при отправке запроса: {e}"
+        return False, f"Исключение при отправке запроса: {e}", []
 
 async def get_card_nmid_by_vendor_code(vendor_code: str) -> int | None:
     """

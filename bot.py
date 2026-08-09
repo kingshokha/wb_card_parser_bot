@@ -32,6 +32,7 @@ async def cmd_start(message: types.Message):
         "• Генерирует короткий артикул продавца\n"
         "• Оставляет бренд пустым\n"
         "• Парсит все свойства и характеристики\n"
+        "• Выводит список характеристик, пропущенных API WB (maxCount=0) для ручного заполнения\n"
         "• Загружает до 30 оригинальных фотографий в высоком качестве"
     )
     await message.answer(welcome_text)
@@ -60,7 +61,6 @@ async def process_wb_link(message: types.Message):
         await message.answer("⚠️ Не удалось найти артикул WB в вашем сообщении. Отправьте ссылку на товар.")
         return
 
-    # Отправляем единое сообщение статуса
     status_msg = await message.answer(f"🔎 <b>Найден артикул WB: <code>{article}</code>. Извлекаю данные...</b>")
 
     # 1. Получаем данные товара с WB
@@ -89,7 +89,7 @@ async def process_wb_link(message: types.Message):
     await status_msg.edit_text(preview_text)
 
     # 2. Создаем карточку в кабинете WB
-    success, result_msg = await upload_card(
+    success, result_msg, skipped_charcs = await upload_card(
         product_info=product_info,
         vendor_code=short_vendor_code
     )
@@ -118,6 +118,16 @@ async def process_wb_link(message: types.Message):
             status_callback=update_status_text
         )
 
+    # Формируем блок пропущенных характеристик (maxCount == 0)
+    skipped_section = ""
+    if skipped_charcs:
+        skipped_items = "\n".join([f"  • <b>{c['name']}:</b> {c['value']}" for c in skipped_charcs])
+        skipped_section = (
+            f"\n\n⚠️ <b>Не переданы через API (заблокированы WB <code>maxCount=0</code>):</b>\n"
+            f"{skipped_items}\n"
+            f"<i>💡 Вы можете заполнить их вручную при необходимости в кабинете WB.</i>"
+        )
+
     # 4. Перезаписываем ИСХОДНОЕ сообщение финальным отчетом
     final_report = (
         f"🎉 <b>Карточка успешно создана!</b>\n\n"
@@ -126,13 +136,14 @@ async def process_wb_link(message: types.Message):
         f"• <b>Ваш артикул продавца (SKU):</b> <code>{short_vendor_code}</code>\n"
         f"• <b>Бренд:</b> <i>[Пусто]</i>\n"
         f"• <b>Категория:</b> {subj_name}\n"
-        f"• <b>Статус фотографий:</b> {'✅ ' + photo_res_text if photos_attached else '⚠️ ' + photo_res_text}\n\n"
+        f"• <b>Статус фотографий:</b> {'✅ ' + photo_res_text if photos_attached else '⚠️ ' + photo_res_text}"
+        f"{skipped_section}\n\n"
         f"📌 <i>Карточка с фотографиями добавлена в ваш кабинет продавца WB.</i>"
     )
     await status_msg.edit_text(final_report)
 
 async def main():
-    logger.info("Бот запускается с продленным ожиданием индексации и поддержкой до 30 фото...")
+    logger.info("Бот запускается с выводом пропущенных характеристик maxCount=0...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
