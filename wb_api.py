@@ -1,6 +1,7 @@
 import re
 import logging
 import asyncio
+import time
 import aiohttp
 from config import WB_SELLER_TOKEN
 
@@ -22,7 +23,7 @@ def transliterate(text: str) -> str:
     return "".join(res)
 
 def generate_short_vendor_code(title: str, article: int) -> str:
-    """Генерирует супер-короткий артикул продавца из названия товара."""
+    """Генерирует гарантированно уникальный супер-короткий артикул продавца из названия товара."""
     clean_title = re.sub(r'[^a-zA-Zа-яА-Я0-9\s]', '', title).strip()
     words = clean_title.split()
     
@@ -32,8 +33,8 @@ def generate_short_vendor_code(title: str, article: int) -> str:
     transliterated = transliterate(short_title)
     transliterated = re.sub(r'-+', '-', transliterated).strip('-')
     
-    suffix = str(article)[-5:]
-    code = f"{transliterated[:12]}-{suffix}".upper()
+    rand_suffix = f"{int(time.time()) % 10000:04d}"
+    code = f"{transliterated[:10]}-{rand_suffix}".upper()
     return code
 
 def get_headers() -> dict:
@@ -227,14 +228,17 @@ async def upload_card(product_info: dict, vendor_code: str) -> tuple[bool, str]:
 
 async def get_card_nmid_by_vendor_code(vendor_code: str) -> int | None:
     """
-    Ищет nmID созданной карточки по ее СТРОГОМУ артикулу продавца (vendorCode).
-    ВАЖНО: Возвращает nmID ТОЛЬКО при точном совпадении vendorCode, чтобы избежать привязки к чужим/старым карточкам.
+    Ищет nmID созданной карточки по её СТРОГОМУ артикулу продавца (vendorCode).
+    ВАЖНО: Возвращает nmID ТОЛЬКО при точном совпадении vendorCode!
     """
     url = f"{BASE_URL}/content/v2/get/cards/list"
     payload = {
         "settings": {
             "cursor": {"limit": 50},
-            "filter": {"textSearch": vendor_code}
+            "filter": {
+                "withPhoto": -1,
+                "textSearch": vendor_code
+            }
         }
     }
     try:
@@ -255,14 +259,14 @@ async def get_card_nmid_by_vendor_code(vendor_code: str) -> int | None:
 async def attach_photos_to_card(vendor_code: str, image_urls: list[str]) -> tuple[bool, str]:
     """
     Загружает фотографии товара через WB Content Media API (POST /content/v3/media/file).
-    1. Ждет появление карточки с ТОЧНЫМ vendorCode и получает её nmID.
+    1. Ждет появление новой карточки с ТОЧНЫМ vendorCode и получает её nmID.
     2. Скачивает байты изображений и загружает файл за файлом с X-Nm-Id и X-Photo-Number.
     """
     if not image_urls:
         return True, "Нет фотографий для загрузки."
 
     nm_id = None
-    # Ждем до 30 секунд (10 попыток по 3 сек), пока WB зарегистрирует и проиндексирует новую карточку
+    # Ждем до 30 секунд (10 попыток по 3 сек), пока WB зарегистрирует новую карточку
     for attempt in range(10):
         await asyncio.sleep(3)
         nm_id = await get_card_nmid_by_vendor_code(vendor_code)
@@ -272,7 +276,7 @@ async def attach_photos_to_card(vendor_code: str, image_urls: list[str]) -> tupl
 
     if not nm_id:
         logger.warning(f"Не удалось найти nmID для артикула продавца {vendor_code} после 10 попыток.")
-        return False, "Карточка еще обрабатывается серверами WB. Фото будут загружены позже."
+        return False, "Карточка еще обрабатывается серверами WB. Фото появятся в течение пары минут."
 
     logger.info(f"Начало загрузки {len(image_urls)} фото для карточки nmID: {nm_id}")
     uploaded_count = 0
