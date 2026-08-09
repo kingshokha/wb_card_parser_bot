@@ -261,12 +261,12 @@ async def attach_photos_to_card(vendor_code: str, image_urls: list[str]) -> tupl
     Загружает фотографии товара через WB Content Media API (POST /content/v3/media/file).
     1. Ждет появление новой карточки с ТОЧНЫМ vendorCode и получает её nmID.
     2. Скачивает байты изображений и загружает файл за файлом с X-Nm-Id и X-Photo-Number.
+    Загружает до 30 фотографий (полный лимит WB).
     """
     if not image_urls:
         return True, "Нет фотографий для загрузки."
 
     nm_id = None
-    # Ждем до 30 секунд (10 попыток по 3 сек), пока WB зарегистрирует новую карточку
     for attempt in range(10):
         await asyncio.sleep(3)
         nm_id = await get_card_nmid_by_vendor_code(vendor_code)
@@ -278,12 +278,13 @@ async def attach_photos_to_card(vendor_code: str, image_urls: list[str]) -> tupl
         logger.warning(f"Не удалось найти nmID для артикула продавца {vendor_code} после 10 попыток.")
         return False, "Карточка еще обрабатывается серверами WB. Фото появятся в течение пары минут."
 
-    logger.info(f"Начало загрузки {len(image_urls)} фото для карточки nmID: {nm_id}")
+    pics_to_upload = image_urls[:30] # Максимальный лимит WB — 30 фотографий
+    logger.info(f"Начало загрузки {len(pics_to_upload)} фото для карточки nmID: {nm_id}")
     uploaded_count = 0
     url = f"{BASE_URL}/content/v3/media/file"
 
     async with aiohttp.ClientSession() as session:
-        for idx, img_url in enumerate(image_urls[:10]):
+        for idx, img_url in enumerate(pics_to_upload):
             try:
                 async with session.get(img_url, timeout=10) as img_resp:
                     if img_resp.status != 200:
@@ -307,9 +308,9 @@ async def attach_photos_to_card(vendor_code: str, image_urls: list[str]) -> tupl
             except Exception as e:
                 logger.error(f"Ошибка при загрузке фото #{idx+1} для nmID {nm_id}: {e}")
 
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
 
     if uploaded_count > 0:
-        return True, f"Загружено {uploaded_count} из {len(image_urls)} фото!"
+        return True, f"Загружено {uploaded_count} из {len(pics_to_upload)} фото!"
     else:
         return False, "Не удалось загрузить фотографии."

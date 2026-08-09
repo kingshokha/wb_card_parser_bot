@@ -21,8 +21,8 @@ def extract_article(text: str) -> int | None:
     if match_param:
         return int(match_param.group(1))
 
-    # 3. Поиск точного совпадения 7-10 цифр
-    match_digits = re.search(r'\b(\d{7,10})\b', text)
+    # 3. Поиск точного совпадения цифр
+    match_digits = re.search(r'\b(\d{5,10})\b', text)
     if match_digits:
         return int(match_digits.group(1))
 
@@ -80,6 +80,7 @@ async def fetch_wb_card(article: int) -> dict | None:
     """
     Универсальный парсер карточек Wildberries.
     Использует параллельный сканер по корзинам 01..80 для мгновенного поиска любых новых товаров.
+    Собирает до 30 фотографий (максимум WB).
     """
     logger.info(f"Начало парсинга товара по артикулу: {article}")
     vol = article // 100000
@@ -95,7 +96,6 @@ async def fetch_wb_card(article: int) -> dict | None:
     working_basket = None
 
     async with aiohttp.ClientSession(headers=headers) as session:
-        # Быстрая функция проверки корзины
         async def check_basket(b_num: int):
             b_host = f"basket-{b_num:02d}.wbbasket.ru"
             cdn_url = f"https://{b_host}/vol{vol}/part{part}/{article}/info/ru/card.json"
@@ -119,7 +119,7 @@ async def fetch_wb_card(article: int) -> dict | None:
         except Exception:
             pass
 
-        # 2. Если на расчетном не нашли — сканируем параллельно серверы 01..80
+        # 2. Перебор серверов 01..80 если нужно
         if not card_data:
             tasks = [check_basket(i) for i in range(1, 81)]
             results = await asyncio.gather(*tasks)
@@ -141,9 +141,9 @@ async def fetch_wb_card(article: int) -> dict | None:
         options = card_data.get("options", [])
         grouped_options = card_data.get("grouped_options", [])
 
-        # Проверка доступных фотографий товара
+        # Проверка всех доступных фотографий товара (до 30 штук — лимит WB)
         image_urls = []
-        for img_idx in range(1, 15):
+        for img_idx in range(1, 31):
             img_url = f"https://{working_basket}/vol{vol}/part{part}/{article}/images/big/{img_idx}.webp"
             try:
                 async with session.head(img_url, timeout=2) as img_resp:
@@ -174,5 +174,5 @@ async def fetch_wb_card(article: int) -> dict | None:
 
         product_info["sizes"] = [{"tech_size": "0", "wb_size": "", "orig_price": 1000}]
 
-    logger.info(f"Успешно спарсен товар: '{name}', Категория: '{subj_name}', Сервер CDN: {working_basket}")
+    logger.info(f"Успешно спарсен товар: '{name}', Категория: '{subj_name}', Фотографий: {len(image_urls)}")
     return product_info
