@@ -99,12 +99,14 @@ def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) 
     Сопоставляет характеристики донора с официальным справочником WB.
     1. Заполняет блок dimensions (длина, ширина, высота).
     2. Исключает характеристики габаритов и веса из массива characteristics.
-    3. Для остальных числовых характеристик (charcType == 4) строго передает числа (int/float).
+    3. Исключает характеристики с maxCount == 0 (заблокированные/недоступные WB).
+    4. Для остальных числовых характеристик (charcType == 4) строго передает числа (int/float).
     """
     charc_lookup = {}
     for c in category_charcs:
         c_name = c.get("name", "").strip().lower()
-        if c_name:
+        # Пропускаем характеристики, для которых WB запрещает ввод (maxCount == 0)
+        if c_name and c.get("maxCount", 1) > 0:
             charc_lookup[c_name] = c
 
     mapped_charcs = []
@@ -265,7 +267,6 @@ async def attach_photos_to_card(vendor_code: str, image_urls: list[str], status_
         return True, "Нет фотографий для загрузки."
 
     nm_id = None
-    # Ждем до 90 секунд (30 попыток по 3 сек), пока WB проиндексирует карточку
     for attempt in range(1, 31):
         if status_callback and attempt % 3 == 0:
             try:
@@ -283,7 +284,7 @@ async def attach_photos_to_card(vendor_code: str, image_urls: list[str], status_
         logger.warning(f"Не удалось найти nmID для артикула продавца {vendor_code} за 90 секунд.")
         return False, "Не удалось получить ID карточки от WB за отведенное время."
 
-    pics_to_upload = image_urls[:30] # Максимальный лимит WB — 30 фотографий
+    pics_to_upload = image_urls[:30]
     logger.info(f"Начало загрузки {len(pics_to_upload)} фото для карточки nmID: {nm_id}")
     uploaded_count = 0
     url = f"{BASE_URL}/content/v3/media/file"
