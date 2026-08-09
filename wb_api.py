@@ -217,7 +217,7 @@ async def upload_card(product_info: dict, vendor_code: str) -> tuple[bool, str]:
             async with session.post(url, headers=get_headers(), json=payload, timeout=15) as resp:
                 resp_data = await resp.json()
                 if resp.status in (200, 201) and not resp_data.get("error"):
-                    return True, f"Карточка создана!"
+                    return True, "Карточка создана!"
                 else:
                     error_msg = resp_data.get("errorText") or resp_data.get("additionalErrors") or str(resp_data)
                     return False, f"Ошибка от WB API: {error_msg}"
@@ -226,11 +226,11 @@ async def upload_card(product_info: dict, vendor_code: str) -> tuple[bool, str]:
         return False, f"Исключение при отправке запроса: {e}"
 
 async def get_card_nmid_by_vendor_code(vendor_code: str) -> int | None:
-    """Ищет nmID созданной карточки по ее артикулу продавца (vendorCode)."""
+    """Ищет самый новый (последний) nmID созданной карточки по её vendorCode."""
     url = f"{BASE_URL}/content/v2/get/cards/list"
     payload = {
         "settings": {
-            "cursor": {"limit": 10},
+            "cursor": {"limit": 50},
             "filter": {"textSearch": vendor_code}
         }
     }
@@ -240,10 +240,17 @@ async def get_card_nmid_by_vendor_code(vendor_code: str) -> int | None:
                 if resp.status == 200:
                     data = await resp.json()
                     cards = data.get("cards", [])
+                    matching_nmids = []
                     for card in cards:
                         if card.get("vendorCode") == vendor_code:
-                            return card.get("nmID")
-                    if cards:
+                            nm_id = card.get("nmID")
+                            if nm_id:
+                                matching_nmids.append(nm_id)
+                    
+                    if matching_nmids:
+                        # Берём наибольший (самый свежесозданный) nmID
+                        return max(matching_nmids)
+                    elif cards:
                         return cards[0].get("nmID")
     except Exception as e:
         logger.error(f"Ошибка при поиске nmID для {vendor_code}: {e}")
@@ -252,15 +259,16 @@ async def get_card_nmid_by_vendor_code(vendor_code: str) -> int | None:
 async def attach_photos_to_card(vendor_code: str, image_urls: list[str]) -> tuple[bool, str]:
     """
     Загружает фотографии товара через WB Content Media API (POST /content/v3/media/file).
-    1. Ищет nmID созданной карточки по её vendorCode.
-    2. Скачивает байты изображений и загружает файл за файлом с X-Nm-Id и X-Photo-Number.
+    1. Ищет самый свежий nmID созданной карточки.
+    2. Скачивает оригинальные байты фотографий и отправляет их в WB через multipart с X-Nm-Id и X-Photo-Number.
     """
     if not image_urls:
         return True, "Нет фотографий для загрузки."
 
+    # Находим самый свежий nmID созданной карточки
     nm_id = None
-    for attempt in range(6):
-        await asyncio.sleep(2)
+    for attempt in range(7):
+        await asyncio.sleep(3)
         nm_id = await get_card_nmid_by_vendor_code(vendor_code)
         if nm_id:
             break
@@ -269,17 +277,21 @@ async def attach_photos_to_card(vendor_code: str, image_urls: list[str]) -> tupl
         logger.warning(f"Не удалось получить nmID для артикула продавца {vendor_code}")
         return False, "Не удалось найти nmID карточки для привязки фото."
 
-    logger.info(f"Начало загрузки {len(image_urls)} фото для карточки nmID: {nm_id}")
+    logger.info(f"Начало загрузки {len(image_urls)} фото для карточки nmID: {nm_id} (VendorCode: {vendor_code})")
     uploaded_count = 0
     url = f"{BASE_URL}/content/v3/media/file"
 
     async with aiohttp.ClientSession() as session:
         for idx, img_url in enumerate(image_urls[:10]):
             try:
+                # Скачиваем байты фотографии с CDN
                 async with session.get(img_url, timeout=10) as img_resp:
                     if img_resp.status != 200:
+                        logger.warning(f"Не удалось скачать фото #{idx+1} по URL: {img_url}")
                         continue
                     img_bytes = await img_resp.read()
+                    content_type = img_resp.headers.get("Content-Type", "image/webp")
+                    ext = "webp" if "webp" in content_type else "jpg"
 
                 headers = {
                     "Authorization": WB_SELLER_TOKEN,
@@ -288,15 +300,19 @@ async def attach_photos_to_card(vendor_code: str, image_urls: list[str]) -> tupl
                 }
 
                 form = aiohttp.FormData()
-                form.add_field('uploadfile', img_bytes, filename=f'photo_{idx+1}.jpg', content_type='image/jpeg')
+                form.add_field('uploadfile', img_bytes, filename=f'photo_{idx+1}.{ext}', content_type=content_type)
 
                 async with session.post(url, headers=headers, data=form, timeout=15) as upload_resp:
                     if upload_resp.status in (200, 201):
                         resp_json = await upload_resp.json()
                         if not resp_json.get("error"):
                             uploaded_count += 1
+                            logger.info(f"Успешно загружено фото #{idx+1} для nmID {nm_id}")
+                    else:
+                        txt = await upload_resp.text()
+                        logger.error(f"Ошибка загрузки фото #{idx+1} для nmID {nm_id} (статус {upload_resp.status}): {txt}")
             except Exception as e:
-                logger.error(f"Ошибка при загрузке фото #{idx+1} для nmID {nm_id}: {e}")
+                logger.error(f"Исключение при загрузке фото #{idx+1} для nmID {nm_id}: {e}")
 
             await asyncio.sleep(0.5)
 
