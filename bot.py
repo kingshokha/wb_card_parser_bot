@@ -26,12 +26,12 @@ async def cmd_start(message: types.Message):
     welcome_text = (
         "👋 <b>Привет! Я бот для автоматического создания карточек Wildberries.</b>\n\n"
         "📥 <b>Как использовать:</b>\n"
-        "Просто отправь мне ссылку на товар WB или его артикул.\n"
+        "Просто отправь мне ссылку на любой товар WB или его артикул.\n"
         "Например: <code>https://www.wildberries.ru/catalog/12345678/detail.aspx</code>\n\n"
         "⚙️ <b>Возможности:</b>\n"
-        "• Генерирует супер-короткий артикул продавца из названия\n"
-        "• Оставляет поле 'Бренд' пустым\n"
-        "• Парсит все реальные характеристики (цвет, комплектация, уход, габариты и т.д.)"
+        "• Генерирует короткий артикул продавца\n"
+        "• Оставляет бренд пустым\n"
+        "• Парсит все свойства и характеристики товара"
     )
     await message.answer(welcome_text)
 
@@ -39,18 +39,21 @@ async def cmd_start(message: types.Message):
 async def cmd_help(message: types.Message):
     help_text = (
         "📖 <b>Инструкция:</b>\n"
-        "Отправьте ссылку на товар WB. Бот скопирует карточку со всеми возможными характеристиками в ваш кабинет."
+        "Отправьте ссылку на товар WB. Бот скопирует карточку с характеристиками в ваш кабинет."
     )
     await message.answer(help_text)
 
 @dp.message(F.text)
 async def process_wb_link(message: types.Message):
+    text = message.text.strip()
+    logger.info(f"Получено сообщение в Telegram: '{text}'")
+
     if not WB_SELLER_TOKEN or WB_SELLER_TOKEN == "YOUR_WB_CONTENT_API_TOKEN_HERE":
         await message.answer("⚠️ <b>Ошибка:</b> Не задан <code>WB_SELLER_TOKEN</code> в файле <code>.env</code>!")
         return
 
-    text = message.text.strip()
     article = extract_article(text)
+    logger.info(f"Извлеченный артикул: {article}")
 
     if not article:
         await message.answer("⚠️ Не удалось найти артикул WB в вашем сообщении. Отправьте ссылку на товар.")
@@ -61,7 +64,7 @@ async def process_wb_link(message: types.Message):
     # 1. Получаем данные товара с WB
     product_info = await fetch_wb_card(article)
     if not product_info:
-        await status_msg.edit_text("❌ <b>Не удалось получить данные о товаре.</b> Проверьте ссылку или артикул.")
+        await status_msg.edit_text(f"❌ <b>Не удалось получить данные о товаре {article}.</b> Проверьте ссылку.")
         return
 
     title = product_info.get("name", "Товар")
@@ -70,16 +73,15 @@ async def process_wb_link(message: types.Message):
     image_urls = product_info.get("image_urls", [])
     options_count = len(product_info.get("options", []))
 
-    # Генерируем супер-короткий артикул продавца
     short_vendor_code = generate_short_vendor_code(title, article)
 
     preview_text = (
-        f"📦 <b>Найден товар:</b>\n"
+        f"📦 <b>Найден товар (Артикул WB: <code>{article}</code>):</b>\n"
         f"• <b>Название:</b> {title}\n"
         f"• <b>Артикул продавца:</b> <code>{short_vendor_code}</code>\n"
         f"• <b>Бренд:</b> <i>[Пусто]</i>\n"
         f"• <b>Категория:</b> {subj_name} (ID: <code>{product_info.get('subject_id')}</code>)\n"
-        f"• <b>Найдено характеристик:</b> {options_count} шт.\n"
+        f"• <b>Характеристик:</b> {options_count} шт.\n"
         f"• <b>Фотографий:</b> {pics_count} шт.\n\n"
         f"🚀 <i>Создаю карточку в вашем кабинете продавца...</i>"
     )
@@ -103,16 +105,17 @@ async def process_wb_link(message: types.Message):
 
     final_report = (
         f"🎉 <b>Карточка успешно создана!</b>\n\n"
-        f"• <b>Артикул продавца (SKU):</b> <code>{short_vendor_code}</code>\n"
+        f"• <b>Товар:</b> {title}\n"
+        f"• <b>Артикул WB:</b> <code>{article}</code>\n"
+        f"• <b>Ваш артикул продавца (SKU):</b> <code>{short_vendor_code}</code>\n"
         f"• <b>Бренд:</b> <i>Оставлен пустым</i>\n"
-        f"• <b>Характеристики:</b> Сопоставлены и добавлены в карточку\n"
         f"• <b>Статус фото:</b> {'✅ Фото привязаны' if photos_attached else '⚠️ Фото не загрузились'}\n\n"
         f"📌 <i>Карточка появится в течение нескольких минут в разделе 'Товары' -> 'Карточки товаров' вашего кабинета WB.</i>"
     )
     await status_msg.answer(final_report)
 
 async def main():
-    logger.info("Бот запускается с обновленной логикой...")
+    logger.info("Бот запускается с точным распознаванием артикула...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 

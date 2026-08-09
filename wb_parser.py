@@ -6,10 +6,25 @@ from config import WB_SELLER_TOKEN
 logger = logging.getLogger(__name__)
 
 def extract_article(text: str) -> int | None:
-    """Извлекает артикул Wildberries из ссылки или текста."""
-    match = re.search(r'catalog/(\d+)/detail', text) or re.search(r'(\d{7,10})', text)
-    if match:
-        return int(match.group(1))
+    """Извлекает артикул Wildberries из ссылки любого формата или текста."""
+    if not text:
+        return None
+
+    # 1. Поиск по шаблону /catalog/123456789/
+    match_catalog = re.search(r'catalog/(\d+)/', text)
+    if match_catalog:
+        return int(match_catalog.group(1))
+
+    # 2. Поиск по параметрам product/123456789 или card=123456789 или nm=123456789
+    match_param = re.search(r'(?:product|card|nm)[=/](\d+)', text, re.IGNORECASE)
+    if match_param:
+        return int(match_param.group(1))
+
+    # 3. Поиск точного совпадения 7-10 цифр
+    match_digits = re.search(r'\b(\d{7,10})\b', text)
+    if match_digits:
+        return int(match_digits.group(1))
+
     return None
 
 def get_basket_host(vol: int) -> str:
@@ -58,13 +73,14 @@ async def get_subject_id_by_name(subj_name: str) -> int:
     except Exception as e:
         logger.warning(f"Не удалось найти subjectID по названию '{subj_name}': {e}")
 
-    return 105 # Фоллбэк ID если категория не найдена
+    return 105
 
 async def fetch_wb_card(article: int) -> dict | None:
     """
     Универсальный парсер карточек Wildberries.
-    Работает через CDN basket JSON и поиск по сайту.
+    Гарантирует получение данных строго по запрошенному артикулу.
     """
+    logger.info(f"Начало парсинга товара по артикулу: {article}")
     vol = article // 100000
     part = article // 1000
 
@@ -79,14 +95,15 @@ async def fetch_wb_card(article: int) -> dict | None:
     working_basket = get_basket_host(vol)
 
     async with aiohttp.ClientSession(headers=headers) as session:
-        # Стратегия 1: Прямой запрос к CDN card.json
+        # Стратегия 1: Прямой запрос к CDN card.json по рассчитанному домену
         cdn_url = f"https://{working_basket}/vol{vol}/part{part}/{article}/info/ru/card.json"
         try:
             async with session.get(cdn_url, timeout=3) as resp:
                 if resp.status == 200:
                     card_data = await resp.json()
-        except Exception:
-            pass
+                    logger.info(f"Карточка {article} найдена на основном сервере {working_basket}")
+        except Exception as e:
+            logger.debug(f"Ошибка получения {cdn_url}: {e}")
 
         # Стратегия 2: Если прямой basket не сработал — перебираем сервера 01..25
         if not card_data:
@@ -98,6 +115,7 @@ async def fetch_wb_card(article: int) -> dict | None:
                         if resp.status == 200:
                             card_data = await resp.json()
                             working_basket = b_host
+                            logger.info(f"Карточка {article} найдена на резервном сервере {working_basket}")
                             break
                 except Exception:
                     pass
@@ -109,12 +127,12 @@ async def fetch_wb_card(article: int) -> dict | None:
         # Сбор основных полей из card.json
         name = card_data.get("imt_name") or card_data.get("name") or "Товар WB"
         subj_name = card_data.get("subj_name", "")
-        brand = card_data.get("selling", {}).get("brand_name") or card_data.get("brand", "Без бренда")
+        brand = card_data.get("selling", {}).get("brand_name") or card_data.get("brand", "")
         description = card_data.get("description", "")
         options = card_data.get("options", [])
         grouped_options = card_data.get("grouped_options", [])
 
-        # Проверка и сбор доступных ссылок на фотографии
+        # Проверка доступных фотографий товара
         image_urls = []
         for img_idx in range(1, 15):
             img_url = f"https://{working_basket}/vol{vol}/part{part}/{article}/images/big/{img_idx}.webp"
@@ -144,7 +162,7 @@ async def fetch_wb_card(article: int) -> dict | None:
             subject_id = await get_subject_id_by_name(subj_name)
         product_info["subject_id"] = subject_id or 105
 
-        # Формируем размеры
         product_info["sizes"] = [{"tech_size": "0", "wb_size": "", "orig_price": 1000}]
 
+    logger.info(f"Успешно спарсен товар: '{name}', Категория: '{subj_name}', Артикул: {article}")
     return product_info
