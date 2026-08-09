@@ -31,7 +31,8 @@ async def cmd_start(message: types.Message):
         "⚙️ <b>Возможности:</b>\n"
         "• Генерирует короткий артикул продавца\n"
         "• Оставляет бренд пустым\n"
-        "• Парсит все свойства и характеристики товара"
+        "• Парсит все свойства и характеристики\n"
+        "• Загружает фотографии высокого качества прямо в карточку"
     )
     await message.answer(welcome_text)
 
@@ -39,7 +40,7 @@ async def cmd_start(message: types.Message):
 async def cmd_help(message: types.Message):
     help_text = (
         "📖 <b>Инструкция:</b>\n"
-        "Отправьте ссылку на товар WB. Бот скопирует карточку с характеристиками в ваш кабинет."
+        "Отправьте ссылку на товар WB. Бот скопирует карточку с характеристиками и фотографиями в ваш кабинет."
     )
     await message.answer(help_text)
 
@@ -59,7 +60,8 @@ async def process_wb_link(message: types.Message):
         await message.answer("⚠️ Не удалось найти артикул WB в вашем сообщении. Отправьте ссылку на товар.")
         return
 
-    status_msg = await message.answer(f"🔎 <b>Извлекаю данные товара (артикул <code>{article}</code>)...</b>")
+    # Отправляем единое сообщение статуса
+    status_msg = await message.answer(f"🔎 <b>Найден артикул WB: <code>{article}</code>. Извлекаю данные...</b>")
 
     # 1. Получаем данные товара с WB
     product_info = await fetch_wb_card(article)
@@ -76,14 +78,13 @@ async def process_wb_link(message: types.Message):
     short_vendor_code = generate_short_vendor_code(title, article)
 
     preview_text = (
-        f"📦 <b>Найден товар (Артикул WB: <code>{article}</code>):</b>\n"
-        f"• <b>Название:</b> {title}\n"
-        f"• <b>Артикул продавца:</b> <code>{short_vendor_code}</code>\n"
-        f"• <b>Бренд:</b> <i>[Пусто]</i>\n"
-        f"• <b>Категория:</b> {subj_name} (ID: <code>{product_info.get('subject_id')}</code>)\n"
+        f"⏳ <b>Создаю карточку в вашем кабинете WB...</b>\n\n"
+        f"• <b>Товар:</b> {title}\n"
+        f"• <b>Артикул WB:</b> <code>{article}</code>\n"
+        f"• <b>Ваш артикул (SKU):</b> <code>{short_vendor_code}</code>\n"
+        f"• <b>Категория:</b> {subj_name}\n"
         f"• <b>Характеристик:</b> {options_count} шт.\n"
-        f"• <b>Фотографий:</b> {pics_count} шт.\n\n"
-        f"🚀 <i>Создаю карточку в вашем кабинете продавца...</i>"
+        f"• <b>Фотографий к загрузке:</b> {pics_count} шт."
     )
     await status_msg.edit_text(preview_text)
 
@@ -94,28 +95,33 @@ async def process_wb_link(message: types.Message):
     )
 
     if not success:
-        await status_msg.answer(f"❌ <b>Ошибка при создании карточки:</b>\n<code>{result_msg}</code>")
+        await status_msg.edit_text(f"❌ <b>Ошибка при создании карточки:</b>\n<code>{result_msg}</code>")
         return
 
-    # 3. Привязываем фотографии к карточке
+    # 3. Привязываем фотографии к созданной карточке (с перезаписью сообщения статуса)
     photos_attached = False
+    photo_res_text = "Нет фото"
     if image_urls:
-        await status_msg.answer("📷 <i>Привязываю фотографии к созданной карточке...</i>")
-        photos_attached, photo_res = await attach_photos_to_card(short_vendor_code, image_urls)
+        await status_msg.edit_text(
+            f"📷 <b>Карточка создана! Загружаю {len(image_urls)} фото для nmID...</b>"
+        )
+        photos_attached, photo_res_text = await attach_photos_to_card(short_vendor_code, image_urls)
 
+    # 4. Перезаписываем ИСХОДНОЕ сообщение финальным отчетом
     final_report = (
         f"🎉 <b>Карточка успешно создана!</b>\n\n"
-        f"• <b>Товар:</b> {title}\n"
-        f"• <b>Артикул WB:</b> <code>{article}</code>\n"
+        f"• <b>Название:</b> {title}\n"
+        f"• <b>Артикул WB донора:</b> <code>{article}</code>\n"
         f"• <b>Ваш артикул продавца (SKU):</b> <code>{short_vendor_code}</code>\n"
-        f"• <b>Бренд:</b> <i>Оставлен пустым</i>\n"
-        f"• <b>Статус фото:</b> {'✅ Фото привязаны' if photos_attached else '⚠️ Фото не загрузились'}\n\n"
-        f"📌 <i>Карточка появится в течение нескольких минут в разделе 'Товары' -> 'Карточки товаров' вашего кабинета WB.</i>"
+        f"• <b>Бренд:</b> <i>[Пусто]</i>\n"
+        f"• <b>Категория:</b> {subj_name}\n"
+        f"• <b>Статус фотографий:</b> {'✅ ' + photo_res_text if photos_attached else '⚠️ ' + photo_res_text}\n\n"
+        f"📌 <i>Карточка с фото добавлена в кабинет продавца WB.</i>"
     )
-    await status_msg.answer(final_report)
+    await status_msg.edit_text(final_report)
 
 async def main():
-    logger.info("Бот запускается с точным распознаванием артикула...")
+    logger.info("Бот запускается с поддержкой загрузки фото и обновления сообщений...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 

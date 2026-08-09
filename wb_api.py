@@ -1,5 +1,6 @@
 import re
 import logging
+import asyncio
 import aiohttp
 from config import WB_SELLER_TOKEN
 
@@ -97,7 +98,7 @@ def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) 
     Сопоставляет характеристики донора с официальным справочником WB.
     1. Заполняет блок dimensions (длина, ширина, высота).
     2. Исключает характеристики габаритов и веса из массива characteristics,
-       так как WB проверяет их через dimensions и генерирует ошибки черновика.
+       так как WB проверяет их через dimensions.
     3. Для остальных числовых характеристик (charcType == 4) строго передает числа (int/float).
     """
     charc_lookup = {}
@@ -109,7 +110,6 @@ def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) 
     mapped_charcs = []
     dimensions = {"length": 10, "width": 10, "height": 10}
 
-    # Ключевые слова габаритов и весов, которые WB обрабатывает через dimensions
     DIM_WEIGHT_KEYWORDS = ["длина", "ширина", "высота", "глубина", "вес"]
 
     for opt in donor_options:
@@ -121,7 +121,6 @@ def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) 
 
         name_lower = raw_name.lower()
 
-        # Поиск габаритов упаковки для блока dimensions
         if "длина" in name_lower:
             num = parse_numeric_value(str(raw_val))
             if num is not None and num > 0: dimensions["length"] = int(num)
@@ -132,7 +131,6 @@ def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) 
             num = parse_numeric_value(str(raw_val))
             if num is not None and num > 0: dimensions["height"] = int(num)
 
-        # Габаритные и весовые характеристики НЕ добавляются в characteristics массив
         if any(kw in name_lower for kw in DIM_WEIGHT_KEYWORDS):
             continue
 
@@ -142,7 +140,6 @@ def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) 
             charc_type = charc_info.get("charcType", 1)
 
             if charc_type == 4:
-                # Числовой тип характеристики — передаем целые/дробные числа
                 if isinstance(raw_val, list):
                     nums = [parse_numeric_value(v) for v in raw_val]
                     vals = [n for n in nums if n is not None]
@@ -150,7 +147,6 @@ def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) 
                     num = parse_numeric_value(str(raw_val))
                     vals = [num] if num is not None else []
             else:
-                # Текстовый тип характеристики — список строк
                 if isinstance(raw_val, str):
                     vals = [v.strip() for v in re.split(r'[;,]', raw_val) if v.strip()]
                 elif isinstance(raw_val, list):
@@ -172,14 +168,11 @@ async def upload_card(product_info: dict, vendor_code: str) -> tuple[bool, str]:
     """
     subject_id = product_info.get("subject_id", 105)
 
-    # 1. Загружаем официальные характеристики категории
     category_charcs = await get_category_characteristics(subject_id)
     donor_options = product_info.get("options", [])
     
-    # 2. Маппим характеристики и габариты
     mapped_charcs, dimensions = map_characteristics(donor_options, category_charcs)
 
-    # 3. Генерируем баркоды для размеров
     parsed_sizes = product_info.get("sizes", [])
     sizes_count = max(1, len(parsed_sizes))
     generated_barcodes = await generate_barcodes(count=sizes_count)
@@ -201,12 +194,11 @@ async def upload_card(product_info: dict, vendor_code: str) -> tuple[bool, str]:
             "skus": generated_barcodes[:1] if generated_barcodes else []
         }]
 
-    # 4. Формируем структуру карточки
     variant_data = {
         "vendorCode": vendor_code,
         "title": product_info.get("name", "Товар")[:60],
         "description": product_info.get("description", "Описание товара")[:5000],
-        "brand": "", # Поле Бренд пустым
+        "brand": "",
         "dimensions": dimensions,
         "characteristics": mapped_charcs,
         "sizes": sizes_payload
@@ -225,7 +217,7 @@ async def upload_card(product_info: dict, vendor_code: str) -> tuple[bool, str]:
             async with session.post(url, headers=get_headers(), json=payload, timeout=15) as resp:
                 resp_data = await resp.json()
                 if resp.status in (200, 201) and not resp_data.get("error"):
-                    return True, f"Карточка создана с {len(mapped_charcs)} характеристиками!"
+                    return True, f"Карточка создана!"
                 else:
                     error_msg = resp_data.get("errorText") or resp_data.get("additionalErrors") or str(resp_data)
                     return False, f"Ошибка от WB API: {error_msg}"
@@ -233,25 +225,82 @@ async def upload_card(product_info: dict, vendor_code: str) -> tuple[bool, str]:
         logger.exception("Ошибка при отправке карточки в WB Content API")
         return False, f"Исключение при отправке запроса: {e}"
 
-async def attach_photos_to_card(vendor_code: str, image_urls: list[str]) -> tuple[bool, str]:
-    """Привязывает фотографии к карточке товара через WB Content Media API."""
-    if not image_urls:
-        return True, "Нет фотографий для привязки."
-
-    url = f"{BASE_URL}/content/v3/media/save"
+async def get_card_nmid_by_vendor_code(vendor_code: str) -> int | None:
+    """Ищет nmID созданной карточки по ее артикулу продавца (vendorCode)."""
+    url = f"{BASE_URL}/content/v2/get/cards/list"
     payload = {
-        "vendorCode": vendor_code,
-        "data": image_urls[:30]
+        "settings": {
+            "cursor": {"limit": 10},
+            "filter": {"textSearch": vendor_code}
+        }
     }
-
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=get_headers(), json=payload, timeout=15) as resp:
-                resp_data = await resp.json()
-                if resp.status in (200, 201) and not resp_data.get("error"):
-                    return True, "Фотографии успешно привязаны!"
-                else:
-                    err = resp_data.get("errorText") or str(resp_data)
-                    return False, f"Ошибка при привязке медиа: {err}"
+            async with session.post(url, headers=get_headers(), json=payload, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    cards = data.get("cards", [])
+                    for card in cards:
+                        if card.get("vendorCode") == vendor_code:
+                            return card.get("nmID")
+                    if cards:
+                        return cards[0].get("nmID")
     except Exception as e:
-        return False, f"Исключение при загрузке медиа: {e}"
+        logger.error(f"Ошибка при поиске nmID для {vendor_code}: {e}")
+    return None
+
+async def attach_photos_to_card(vendor_code: str, image_urls: list[str]) -> tuple[bool, str]:
+    """
+    Загружает фотографии товара через WB Content Media API (POST /content/v3/media/file).
+    1. Ищет nmID созданной карточки по её vendorCode.
+    2. Скачивает байты изображений и загружает файл за файлом с X-Nm-Id и X-Photo-Number.
+    """
+    if not image_urls:
+        return True, "Нет фотографий для загрузки."
+
+    nm_id = None
+    for attempt in range(6):
+        await asyncio.sleep(2)
+        nm_id = await get_card_nmid_by_vendor_code(vendor_code)
+        if nm_id:
+            break
+
+    if not nm_id:
+        logger.warning(f"Не удалось получить nmID для артикула продавца {vendor_code}")
+        return False, "Не удалось найти nmID карточки для привязки фото."
+
+    logger.info(f"Начало загрузки {len(image_urls)} фото для карточки nmID: {nm_id}")
+    uploaded_count = 0
+    url = f"{BASE_URL}/content/v3/media/file"
+
+    async with aiohttp.ClientSession() as session:
+        for idx, img_url in enumerate(image_urls[:10]):
+            try:
+                async with session.get(img_url, timeout=10) as img_resp:
+                    if img_resp.status != 200:
+                        continue
+                    img_bytes = await img_resp.read()
+
+                headers = {
+                    "Authorization": WB_SELLER_TOKEN,
+                    "X-Nm-Id": str(nm_id),
+                    "X-Photo-Number": str(idx + 1)
+                }
+
+                form = aiohttp.FormData()
+                form.add_field('uploadfile', img_bytes, filename=f'photo_{idx+1}.jpg', content_type='image/jpeg')
+
+                async with session.post(url, headers=headers, data=form, timeout=15) as upload_resp:
+                    if upload_resp.status in (200, 201):
+                        resp_json = await upload_resp.json()
+                        if not resp_json.get("error"):
+                            uploaded_count += 1
+            except Exception as e:
+                logger.error(f"Ошибка при загрузке фото #{idx+1} для nmID {nm_id}: {e}")
+
+            await asyncio.sleep(0.5)
+
+    if uploaded_count > 0:
+        return True, f"Загружено {uploaded_count} из {len(image_urls)} фото!"
+    else:
+        return False, "Не удалось загрузить фотографии."
