@@ -95,7 +95,10 @@ async def get_category_characteristics(subject_id: int) -> list[dict]:
 def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) -> tuple[list[dict], dict]:
     """
     Сопоставляет характеристики донора с официальным справочником WB.
-    Для числовых характеристик (charcType == 4) строго передает числа (int/float), а не строки.
+    1. Заполняет блок dimensions (длина, ширина, высота).
+    2. Исключает характеристики габаритов и веса из массива characteristics,
+       так как WB проверяет их через dimensions и генерирует ошибки черновика.
+    3. Для остальных числовых характеристик (charcType == 4) строго передает числа (int/float).
     """
     charc_lookup = {}
     for c in category_charcs:
@@ -106,6 +109,9 @@ def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) 
     mapped_charcs = []
     dimensions = {"length": 10, "width": 10, "height": 10}
 
+    # Ключевые слова габаритов и весов, которые WB обрабатывает через dimensions
+    DIM_WEIGHT_KEYWORDS = ["длина", "ширина", "высота", "глубина", "вес"]
+
     for opt in donor_options:
         raw_name = opt.get("name", "").strip()
         raw_val = opt.get("value", "")
@@ -115,16 +121,20 @@ def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) 
 
         name_lower = raw_name.lower()
 
-        # Поиск габаритов упаковки в характеристиках
-        if "длина упаковки" in name_lower or "длина, см" in name_lower:
+        # Поиск габаритов упаковки для блока dimensions
+        if "длина" in name_lower:
             num = parse_numeric_value(str(raw_val))
-            if num is not None: dimensions["length"] = max(1, int(num))
-        elif "ширина упаковки" in name_lower or "ширина, см" in name_lower:
+            if num is not None and num > 0: dimensions["length"] = int(num)
+        elif "ширина" in name_lower:
             num = parse_numeric_value(str(raw_val))
-            if num is not None: dimensions["width"] = max(1, int(num))
-        elif "высота упаковки" in name_lower or "высота, см" in name_lower:
+            if num is not None and num > 0: dimensions["width"] = int(num)
+        elif "высота" in name_lower or "глубина" in name_lower:
             num = parse_numeric_value(str(raw_val))
-            if num is not None: dimensions["height"] = max(1, int(num))
+            if num is not None and num > 0: dimensions["height"] = int(num)
+
+        # Габаритные и весовые характеристики НЕ добавляются в characteristics массив
+        if any(kw in name_lower for kw in DIM_WEIGHT_KEYWORDS):
+            continue
 
         if name_lower in charc_lookup:
             charc_info = charc_lookup[name_lower]
@@ -132,7 +142,7 @@ def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) 
             charc_type = charc_info.get("charcType", 1)
 
             if charc_type == 4:
-                # Числовой тип характеристики — значения должны быть числами (int / float)!
+                # Числовой тип характеристики — передаем целые/дробные числа
                 if isinstance(raw_val, list):
                     nums = [parse_numeric_value(v) for v in raw_val]
                     vals = [n for n in nums if n is not None]
