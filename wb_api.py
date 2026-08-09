@@ -98,8 +98,7 @@ def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) 
     """
     Сопоставляет характеристики донора с официальным справочником WB.
     1. Заполняет блок dimensions (длина, ширина, высота).
-    2. Исключает характеристики габаритов и веса из массива characteristics,
-       так как WB проверяет их через dimensions.
+    2. Исключает характеристики габаритов и веса из массива characteristics.
     3. Для остальных числовых характеристик (charcType == 4) строго передает числа (int/float).
     """
     charc_lookup = {}
@@ -256,27 +255,33 @@ async def get_card_nmid_by_vendor_code(vendor_code: str) -> int | None:
         logger.error(f"Ошибка при поиске nmID для {vendor_code}: {e}")
     return None
 
-async def attach_photos_to_card(vendor_code: str, image_urls: list[str]) -> tuple[bool, str]:
+async def attach_photos_to_card(vendor_code: str, image_urls: list[str], status_callback=None) -> tuple[bool, str]:
     """
     Загружает фотографии товара через WB Content Media API (POST /content/v3/media/file).
-    1. Ждет появление новой карточки с ТОЧНЫМ vendorCode и получает её nmID.
-    2. Скачивает байты изображений и загружает файл за файлом с X-Nm-Id и X-Photo-Number.
-    Загружает до 30 фотографий (полный лимит WB).
+    1. Ждет появление новой карточки в кабинете продавца до 90 секунд (30 попыток по 3 сек).
+    2. Скачивает оригиналы и загружает файлы с X-Nm-Id и X-Photo-Number.
     """
     if not image_urls:
         return True, "Нет фотографий для загрузки."
 
     nm_id = None
-    for attempt in range(10):
+    # Ждем до 90 секунд (30 попыток по 3 сек), пока WB проиндексирует карточку
+    for attempt in range(1, 31):
+        if status_callback and attempt % 3 == 0:
+            try:
+                await status_callback(f"📷 <b>Ожидаю готовность карточки в WB (попытка {attempt}/30)...</b>")
+            except Exception:
+                pass
+
         await asyncio.sleep(3)
         nm_id = await get_card_nmid_by_vendor_code(vendor_code)
         if nm_id:
-            logger.info(f"Найдена созданная карточка nmID: {nm_id} для vendorCode: {vendor_code} (попытка #{attempt+1})")
+            logger.info(f"Найдена созданная карточка nmID: {nm_id} для vendorCode: {vendor_code} (попытка #{attempt})")
             break
 
     if not nm_id:
-        logger.warning(f"Не удалось найти nmID для артикула продавца {vendor_code} после 10 попыток.")
-        return False, "Карточка еще обрабатывается серверами WB. Фото появятся в течение пары минут."
+        logger.warning(f"Не удалось найти nmID для артикула продавца {vendor_code} за 90 секунд.")
+        return False, "Не удалось получить ID карточки от WB за отведенное время."
 
     pics_to_upload = image_urls[:30] # Максимальный лимит WB — 30 фотографий
     logger.info(f"Начало загрузки {len(pics_to_upload)} фото для карточки nmID: {nm_id}")

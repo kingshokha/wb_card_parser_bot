@@ -32,7 +32,7 @@ async def cmd_start(message: types.Message):
         "• Генерирует короткий артикул продавца\n"
         "• Оставляет бренд пустым\n"
         "• Парсит все свойства и характеристики\n"
-        "• Загружает фотографии высокого качества прямо в карточку"
+        "• Загружает до 30 оригинальных фотографий в высоком качестве"
     )
     await message.answer(welcome_text)
 
@@ -98,14 +98,25 @@ async def process_wb_link(message: types.Message):
         await status_msg.edit_text(f"❌ <b>Ошибка при создании карточки:</b>\n<code>{result_msg}</code>")
         return
 
-    # 3. Привязываем фотографии к созданной карточке (с перезаписью сообщения статуса)
+    # Callback функция обновления текста
+    async def update_status_text(new_text: str):
+        try:
+            await status_msg.edit_text(new_text)
+        except Exception:
+            pass
+
+    # 3. Привязываем фотографии к созданной карточке
     photos_attached = False
     photo_res_text = "Нет фото"
     if image_urls:
         await status_msg.edit_text(
-            f"📷 <b>Карточка создана! Загружаю {len(image_urls)} фото для nmID...</b>"
+            f"📷 <b>Карточка создана! Ожидаю готовность в WB и загружаю {len(image_urls)} фото...</b>"
         )
-        photos_attached, photo_res_text = await attach_photos_to_card(short_vendor_code, image_urls)
+        photos_attached, photo_res_text = await attach_photos_to_card(
+            short_vendor_code,
+            image_urls,
+            status_callback=update_status_text
+        )
 
     # 4. Перезаписываем ИСХОДНОЕ сообщение финальным отчетом
     final_report = (
@@ -116,12 +127,12 @@ async def process_wb_link(message: types.Message):
         f"• <b>Бренд:</b> <i>[Пусто]</i>\n"
         f"• <b>Категория:</b> {subj_name}\n"
         f"• <b>Статус фотографий:</b> {'✅ ' + photo_res_text if photos_attached else '⚠️ ' + photo_res_text}\n\n"
-        f"📌 <i>Карточка с фото добавлена в кабинет продавца WB.</i>"
+        f"📌 <i>Карточка с фотографиями добавлена в ваш кабинет продавца WB.</i>"
     )
     await status_msg.edit_text(final_report)
 
 async def main():
-    logger.info("Бот запускается с поддержкой загрузки фото и обновления сообщений...")
+    logger.info("Бот запускается с продленным ожиданием индексации и поддержкой до 30 фото...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
