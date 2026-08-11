@@ -9,6 +9,7 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.exceptions import TelegramNetworkError, TelegramAPIError
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import BotCommand, BotCommandScopeDefault
 
 from config import BOT_TOKEN, WB_SELLER_TOKEN
 from wb_parser import extract_article, fetch_wb_card
@@ -31,6 +32,19 @@ bot = Bot(
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
 dp = Dispatcher()
+
+async def setup_bot_commands(bot: Bot):
+    """Регистрирует список команд в интерфейсе Telegram (всплывающее меню при вводе /)."""
+    commands = [
+        BotCommand(command="start", description="Запустить бота и получить инструкцию"),
+        BotCommand(command="help", description="Справка по использованию"),
+        BotCommand(command="charcs", description="Посмотреть детальные характеристики товара")
+    ]
+    try:
+        await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+        logger.info("Команды бота успешно зарегистрированы в меню Telegram.")
+    except Exception as e:
+        logger.error(f"Не удалось зарегистрировать меню команд Telegram: {e}")
 
 async def safe_edit_text(message: types.Message, text: str, retries: int = 3):
     """Надежное редактирование текста сообщения с повторами при сетевых сбоях Telegram."""
@@ -132,7 +146,6 @@ async def show_card_characteristics(message: types.Message, text_with_art: str, 
         f"{options_block}"
     )
 
-    # Если сообщение слишком длинное (лимит Telegram 4096 символов), разбиваем на части
     if len(report) > 4000:
         header = (
             f"📋 <b>Характеристики товара (Артикул WB: <code>{article}</code>)</b>\n\n"
@@ -279,8 +292,9 @@ async def process_wb_link(message: types.Message, state: FSMContext):
     await safe_edit_text(status_msg, final_report)
 
 async def main():
-    logger.info("Бот запускается с поддержкой команды /charcs и просмотра характеристик...")
+    logger.info("Бот запускается с автоматической регистрацией меню команд в Telegram...")
     await bot.delete_webhook(drop_pending_updates=True)
+    await setup_bot_commands(bot)
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
