@@ -99,14 +99,13 @@ def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) 
     Сопоставляет характеристики донора с официальной спецификацией WB API:
     - charcType == 0: характеристика отключена WB (пропускается).
     - charcType == 1: массив строк. Если maxCount > 0, срез до maxCount; если maxCount == 0, без ограничений.
-    - charcType == 4: строго ОДНО СКАЛЯРНОЕ число (int/float), НЕ массив. Единицы измерить не передаются.
-    - Габариты и вес исключаются из массива characteristics и передаются в блок dimensions.
+    - charcType == 4: строго ОДНО СКАЛЯРНОЕ число (int/float), НЕ массив.
+    - Габариты и вес с упаковкой (weightBrutto) передаются в блок dimensions.
     """
     charc_lookup = {}
     for c in category_charcs:
         c_name = c.get("name", "").strip().lower()
         c_type = c.get("charcType", 1)
-        # charcType == 0 означает, что характеристика отключена в WB
         if c_name and c_type != 0:
             charc_lookup[c_name] = c
 
@@ -114,7 +113,7 @@ def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) 
     skipped_charcs = []
     dimensions = {"length": 10, "width": 10, "height": 10}
 
-    DIM_WEIGHT_KEYWORDS = ["длина", "ширина", "высота", "глубина", "вес"]
+    DIM_WEIGHT_KEYWORDS = ["длина", "ширина", "высота", "глубина", "вес", "масса"]
 
     for opt in donor_options:
         raw_name = opt.get("name", "").strip()
@@ -135,6 +134,15 @@ def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) 
         elif "высота" in name_lower or "глубина" in name_lower:
             num = parse_numeric_value(str(raw_val))
             if num is not None and num > 0: dimensions["height"] = int(num)
+        elif "вес" in name_lower or "масса" in name_lower:
+            num = parse_numeric_value(str(raw_val))
+            if num is not None and num > 0:
+                val_str = str(raw_val).lower()
+                # Перевод граммов в килограммы если указаны граммы или число > 50 (например 2700 г)
+                if " г" in val_str or "грамм" in val_str or num > 50:
+                    dimensions["weightBrutto"] = round(num / 1000.0, 3)
+                else:
+                    dimensions["weightBrutto"] = round(num, 3)
 
         if any(kw in name_lower for kw in DIM_WEIGHT_KEYWORDS):
             continue
@@ -146,7 +154,6 @@ def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) 
             max_count = charc_info.get("maxCount", 0)
 
             if charc_type == 4:
-                # charcType == 4 — ВСЕГДА скалярное число (int/float), НЕ массив!
                 if isinstance(raw_val, list):
                     nums = [parse_numeric_value(v) for v in raw_val]
                     valid_nums = [n for n in nums if n is not None]
@@ -157,10 +164,9 @@ def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) 
                 if num_val is not None and charc_id:
                     mapped_charcs.append({
                         "id": charc_id,
-                        "value": num_val # Скалярное число
+                        "value": num_val
                     })
             else:
-                # charcType == 1 — массив строк
                 if isinstance(raw_val, str):
                     vals = [v.strip() for v in re.split(r'[;,]', raw_val) if v.strip()]
                 elif isinstance(raw_val, list):
@@ -168,14 +174,13 @@ def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) 
                 else:
                     vals = [str(raw_val).strip()]
 
-                # Если maxCount > 0, ограничиваем количество элементов в массиве
                 if max_count > 0 and len(vals) > max_count:
                     vals = vals[:max_count]
 
                 if vals and charc_id:
                     mapped_charcs.append({
                         "id": charc_id,
-                        "value": vals # Массив строк
+                        "value": vals
                     })
 
     return mapped_charcs, dimensions, skipped_charcs
