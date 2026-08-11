@@ -1,9 +1,12 @@
 import logging
 import asyncio
+import aiohttp
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart, Command
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.exceptions import TelegramNetworkError, TelegramAPIError
 
 from config import BOT_TOKEN, WB_SELLER_TOKEN
 from wb_parser import extract_article, fetch_wb_card
@@ -15,11 +18,46 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Инициализируем бота с кастомной сессией и авто-повторами при сбоях сети
+session = AiohttpSession()
 bot = Bot(
     token=BOT_TOKEN,
+    session=session,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
 dp = Dispatcher()
+
+async def safe_edit_text(message: types.Message, text: str, retries: int = 3):
+    """Надежное редактирование текста сообщения с повторами при сетевых сбоях Telegram."""
+    for attempt in range(retries):
+        try:
+            return await message.edit_text(text)
+        except TelegramNetworkError as e:
+            logger.warning(f"Сетевой сбой при редактировании сообщения (попытка #{attempt+1}): {e}")
+            await asyncio.sleep(1.5)
+        except TelegramAPIError as e:
+            # Игнорируем ошибку "текст сообщения не изменился"
+            if "message is not modified" in str(e).lower():
+                return message
+            logger.warning(f"Ошибка Telegram API: {e}")
+            break
+        except Exception as e:
+            logger.error(f"Исключение при безопасном edit_text: {e}")
+            break
+    return message
+
+async def safe_reply(message: types.Message, text: str, retries: int = 3) -> types.Message | None:
+    """Надежная отправка ответа пользователю с повторами при сетевых сбоях Telegram."""
+    for attempt in range(retries):
+        try:
+            return await message.answer(text)
+        except TelegramNetworkError as e:
+            logger.warning(f"Сетевой сбой при отправке ответа (попытка #{attempt+1}): {e}")
+            await asyncio.sleep(1.5)
+        except Exception as e:
+            logger.error(f"Исключение при безопасном answer: {e}")
+            break
+    return None
 
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message):
@@ -32,10 +70,11 @@ async def cmd_start(message: types.Message):
         "• Генерирует короткий артикул продавца\n"
         "• Оставляет бренд пустым\n"
         "• Парсит все свойства и характеристики\n"
-        "• Выводит список характеристик, пропущенных API WB (maxCount=0) для ручного заполнения\n"
+        "• Добавляет 'Вес с упаковкой' в габариты товара\n"
+        "• Передает числовые параметры (charcType=4) строгими числами\n"
         "• Загружает до 30 оригинальных фотографий в высоком качестве"
     )
-    await message.answer(welcome_text)
+    await safe_reply(message, welcome_text)
 
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
@@ -43,7 +82,7 @@ async def cmd_help(message: types.Message):
         "📖 <b>Инструкция:</b>\n"
         "Отправьте ссылку на товар WB. Бот скопирует карточку с характеристиками и фотографиями в ваш кабинет."
     )
-    await message.answer(help_text)
+    await safe_reply(message, help_text)
 
 @dp.message(F.text)
 async def process_wb_link(message: types.Message):
@@ -51,22 +90,25 @@ async def process_wb_link(message: types.Message):
     logger.info(f"Получено сообщение в Telegram: '{text}'")
 
     if not WB_SELLER_TOKEN or WB_SELLER_TOKEN == "YOUR_WB_CONTENT_API_TOKEN_HERE":
-        await message.answer("⚠️ <b>Ошибка:</b> Не задан <code>WB_SELLER_TOKEN</code> в файле <code>.env</code>!")
+        await safe_reply(message, "⚠️ <b>Ошибка:</b> Не задан <code>WB_SELLER_TOKEN</code> в файле <code>.env</code>!")
         return
 
     article = extract_article(text)
     logger.info(f"Извлеченный артикул: {article}")
 
     if not article:
-        await message.answer("⚠️ Не удалось найти артикул WB в вашем сообщении. Отправьте ссылку на товар.")
+        await safe_reply(message, "⚠️ Не удалось найти артикул WB в вашем сообщении. Отправьте ссылку на товар.")
         return
 
-    status_msg = await message.answer(f"🔎 <b>Найден артикул WB: <code>{article}</code>. Извлекаю данные...</b>")
+    status_msg = await safe_reply(message, f"🔎 <b>Найден артикул WB: <code>{article}</code>. Извлекаю данные...</b>")
+    if not status_msg:
+        logger.error("Не удалось отправить начальное сообщение пользователю.")
+        return
 
     # 1. Получаем данные товара с WB
     product_info = await fetch_wb_card(article)
     if not product_info:
-        await status_msg.edit_text(f"❌ <b>Не удалось получить данные о товаре {article}.</b> Проверьте ссылку.")
+        await safe_edit_text(status_msg, f"❌ <b>Не удалось получить данные о товаре {article}.</b> Проверьте ссылку.")
         return
 
     title = product_info.get("name", "Товар")
@@ -86,7 +128,7 @@ async def process_wb_link(message: types.Message):
         f"• <b>Характеристик:</b> {options_count} шт.\n"
         f"• <b>Фотографий к загрузке:</b> {pics_count} шт."
     )
-    await status_msg.edit_text(preview_text)
+    await safe_edit_text(status_msg, preview_text)
 
     # 2. Создаем карточку в кабинете WB
     success, result_msg, skipped_charcs = await upload_card(
@@ -95,21 +137,19 @@ async def process_wb_link(message: types.Message):
     )
 
     if not success:
-        await status_msg.edit_text(f"❌ <b>Ошибка при создании карточки:</b>\n<code>{result_msg}</code>")
+        await safe_edit_text(status_msg, f"❌ <b>Ошибка при создании карточки:</b>\n<code>{result_msg}</code>")
         return
 
-    # Callback функция обновления текста
+    # Callback функция обновления текста с устойчивостью к сбоям сети
     async def update_status_text(new_text: str):
-        try:
-            await status_msg.edit_text(new_text)
-        except Exception:
-            pass
+        await safe_edit_text(status_msg, new_text)
 
     # 3. Привязываем фотографии к созданной карточке
     photos_attached = False
     photo_res_text = "Нет фото"
     if image_urls:
-        await status_msg.edit_text(
+        await safe_edit_text(
+            status_msg,
             f"📷 <b>Карточка создана! Ожидаю готовность в WB и загружаю {len(image_urls)} фото...</b>"
         )
         photos_attached, photo_res_text = await attach_photos_to_card(
@@ -118,12 +158,12 @@ async def process_wb_link(message: types.Message):
             status_callback=update_status_text
         )
 
-    # Формируем блок пропущенных характеристик (maxCount == 0)
+    # Формируем блок пропущенных характеристик (если есть отключенные charcType=0)
     skipped_section = ""
     if skipped_charcs:
         skipped_items = "\n".join([f"  • <b>{c['name']}:</b> {c['value']}" for c in skipped_charcs])
         skipped_section = (
-            f"\n\n⚠️ <b>Не переданы через API (заблокированы WB <code>maxCount=0</code>):</b>\n"
+            f"\n\n⚠️ <b>Не переданы через API (заблокированы WB <code>charcType=0</code>):</b>\n"
             f"{skipped_items}\n"
             f"<i>💡 Вы можете заполнить их вручную при необходимости в кабинете WB.</i>"
         )
@@ -140,10 +180,10 @@ async def process_wb_link(message: types.Message):
         f"{skipped_section}\n\n"
         f"📌 <i>Карточка с фотографиями добавлена в ваш кабинет продавца WB.</i>"
     )
-    await status_msg.edit_text(final_report)
+    await safe_edit_text(status_msg, final_report)
 
 async def main():
-    logger.info("Бот запускается с выводом пропущенных характеристик maxCount=0...")
+    logger.info("Бот запускается с авто-повторами при сетевых сбоях...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
