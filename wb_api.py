@@ -96,20 +96,19 @@ async def get_category_characteristics(subject_id: int) -> list[dict]:
 
 def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) -> tuple[list[dict], dict, list[dict]]:
     """
-    Сопоставляет характеристики донора с официальным справочником WB.
-    1. Заполняет блок dimensions (длина, ширина, высота).
-    2. Исключает характеристики габаритов и веса из массива characteristics.
-    3. Отслеживает и отдельно возвращает характеристики с maxCount == 0 (skipped_charcs).
-    4. Для остальных числовых характеристик (charcType == 4) строго передает числа (int/float).
+    Сопоставляет характеристики донора с официальной спецификацией WB API:
+    - charcType == 0: характеристика отключена WB (пропускается).
+    - charcType == 1: массив строк. Если maxCount > 0, срез до maxCount; если maxCount == 0, без ограничений.
+    - charcType == 4: строго ОДНО СКАЛЯРНОЕ число (int/float), НЕ массив. Единицы измерить не передаются.
+    - Габариты и вес исключаются из массива characteristics и передаются в блок dimensions.
     """
-    all_cat_lookup = {}
-    valid_cat_lookup = {}
+    charc_lookup = {}
     for c in category_charcs:
         c_name = c.get("name", "").strip().lower()
-        if c_name:
-            all_cat_lookup[c_name] = c
-            if c.get("maxCount", 1) > 0:
-                valid_cat_lookup[c_name] = c
+        c_type = c.get("charcType", 1)
+        # charcType == 0 означает, что характеристика отключена в WB
+        if c_name and c_type != 0:
+            charc_lookup[c_name] = c
 
     mapped_charcs = []
     skipped_charcs = []
@@ -126,6 +125,7 @@ def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) 
 
         name_lower = raw_name.lower()
 
+        # Выделение габаритов предметов/упаковки
         if "длина" in name_lower:
             num = parse_numeric_value(str(raw_val))
             if num is not None and num > 0: dimensions["length"] = int(num)
@@ -139,40 +139,44 @@ def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) 
         if any(kw in name_lower for kw in DIM_WEIGHT_KEYWORDS):
             continue
 
-        # Если характеристика есть в категории, но у неё maxCount == 0 (WB запретил ввод)
-        if name_lower in all_cat_lookup and name_lower not in valid_cat_lookup:
-            val_str = ", ".join(raw_val) if isinstance(raw_val, list) else str(raw_val)
-            skipped_charcs.append({
-                "name": raw_name,
-                "value": val_str
-            })
-            continue
-
-        if name_lower in valid_cat_lookup:
-            charc_info = valid_cat_lookup[name_lower]
+        if name_lower in charc_lookup:
+            charc_info = charc_lookup[name_lower]
             charc_id = charc_info.get("charcID")
             charc_type = charc_info.get("charcType", 1)
+            max_count = charc_info.get("maxCount", 0)
 
             if charc_type == 4:
+                # charcType == 4 — ВСЕГДА скалярное число (int/float), НЕ массив!
                 if isinstance(raw_val, list):
                     nums = [parse_numeric_value(v) for v in raw_val]
-                    vals = [n for n in nums if n is not None]
+                    valid_nums = [n for n in nums if n is not None]
+                    num_val = valid_nums[0] if valid_nums else None
                 else:
-                    num = parse_numeric_value(str(raw_val))
-                    vals = [num] if num is not None else []
+                    num_val = parse_numeric_value(str(raw_val))
+
+                if num_val is not None and charc_id:
+                    mapped_charcs.append({
+                        "id": charc_id,
+                        "value": num_val # Скалярное число
+                    })
             else:
+                # charcType == 1 — массив строк
                 if isinstance(raw_val, str):
                     vals = [v.strip() for v in re.split(r'[;,]', raw_val) if v.strip()]
                 elif isinstance(raw_val, list):
-                    vals = [str(v) for v in raw_val]
+                    vals = [str(v).strip() for v in raw_val if str(v).strip()]
                 else:
-                    vals = [str(raw_val)]
+                    vals = [str(raw_val).strip()]
 
-            if vals and charc_id:
-                mapped_charcs.append({
-                    "id": charc_id,
-                    "value": vals
-                })
+                # Если maxCount > 0, ограничиваем количество элементов в массиве
+                if max_count > 0 and len(vals) > max_count:
+                    vals = vals[:max_count]
+
+                if vals and charc_id:
+                    mapped_charcs.append({
+                        "id": charc_id,
+                        "value": vals # Массив строк
+                    })
 
     return mapped_charcs, dimensions, skipped_charcs
 
