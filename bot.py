@@ -32,7 +32,7 @@ async def cmd_start(message: types.Message):
         "• Генерирует короткий артикул продавца\n"
         "• Оставляет бренд пустым\n"
         "• Парсит все свойства и характеристики\n"
-        "• Выводит список характеристик, пропущенных API WB (maxCount=0) для ручного заполнения\n"
+        "• Сохраняет заблокированные API WB характеристики (maxCount=0) в описании\n"
         "• Загружает до 30 оригинальных фотографий в высоком качестве"
     )
     await message.answer(welcome_text)
@@ -118,14 +118,14 @@ async def process_wb_link(message: types.Message):
             status_callback=update_status_text
         )
 
-    # Формируем блок пропущенных характеристик (maxCount == 0)
+    # Формируем блок перенесенных в описание характеристик (maxCount == 0)
     skipped_section = ""
     if skipped_charcs:
         skipped_items = "\n".join([f"  • <b>{c['name']}:</b> {c['value']}" for c in skipped_charcs])
         skipped_section = (
-            f"\n\n⚠️ <b>Не переданы через API (заблокированы WB <code>maxCount=0</code>):</b>\n"
+            f"\n\nℹ️ <b>Перенесены в описание (WB блокирует отдельные поля с <code>maxCount=0</code>):</b>\n"
             f"{skipped_items}\n"
-            f"<i>💡 Вы можете заполнить их вручную при необходимости в кабинете WB.</i>"
+            f"<i>Значения сохранены в карточке и не отправлялись в запрещенные поля.</i>"
         )
 
     # 4. Перезаписываем ИСХОДНОЕ сообщение финальным отчетом
@@ -143,7 +143,7 @@ async def process_wb_link(message: types.Message):
     await status_msg.edit_text(final_report)
 
 async def main():
-    logger.info("Бот запускается с выводом пропущенных характеристик maxCount=0...")
+    logger.info("Бот запускается с переносом характеристик maxCount=0 в описание...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
@@ -152,3 +152,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот остановлен.")
+
