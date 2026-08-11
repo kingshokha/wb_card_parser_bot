@@ -8,6 +8,7 @@ from config import WB_SELLER_TOKEN
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://content-api.wildberries.ru"
+MAX_DESCRIPTION_LENGTH = 5000
 
 TRANSLIT_MAP = {
     'а':'a', 'б':'b', 'в':'v', 'г':'g', 'д':'d', 'е':'e', 'ё':'yo', 'ж':'zh',
@@ -63,6 +64,41 @@ def parse_numeric_value(val_str: str) -> int | float | None:
                 pass
     return None
 
+
+def build_description_with_restricted_charcs(
+    description: str,
+    restricted_charcs: list[dict],
+    max_length: int = MAX_DESCRIPTION_LENGTH
+) -> str:
+    """
+    Сохраняет значения характеристик с maxCount=0 в описании карточки.
+
+    WB не принимает такие характеристики в массиве ``characteristics``, поэтому
+    описание — единственное валидное поле Content API, куда их можно перенести
+    автоматически. Место под этот блок резервируется за счет исходного описания.
+    """
+    base_description = str(description or "Описание товара").strip()
+    if not restricted_charcs:
+        return base_description[:max_length]
+
+    lines = []
+    for charc in restricted_charcs:
+        name = " ".join(str(charc.get("name", "")).split())
+        value = " ".join(str(charc.get("value", "")).split())
+        if name and value:
+            lines.append(f"{name}: {value}")
+
+    if not lines:
+        return base_description[:max_length]
+
+    restricted_block = "Характеристики товара:\n" + "\n".join(lines)
+    if len(restricted_block) >= max_length:
+        return restricted_block[:max_length]
+
+    separator = "\n\n" if base_description else ""
+    base_limit = max_length - len(separator) - len(restricted_block)
+    return f"{base_description[:base_limit].rstrip()}{separator}{restricted_block}"
+
 async def generate_barcodes(count: int = 1) -> list[str]:
     """Генерирует уникальные штрихкоды через WB API."""
     url = f"{BASE_URL}/content/v2/barcodes"
@@ -99,7 +135,8 @@ def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) 
     Сопоставляет характеристики донора с официальным справочником WB.
     1. Заполняет блок dimensions (длина, ширина, высота).
     2. Исключает характеристики габаритов и веса из массива characteristics.
-    3. Отслеживает и отдельно возвращает характеристики с maxCount == 0 (skipped_charcs).
+    3. Отслеживает и отдельно возвращает характеристики с maxCount == 0 для
+       безопасного переноса в описание карточки.
     4. Для остальных числовых характеристик (charcType == 4) строго передает числа (int/float).
     """
     all_cat_lookup = {}
@@ -139,7 +176,8 @@ def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) 
         if any(kw in name_lower for kw in DIM_WEIGHT_KEYWORDS):
             continue
 
-        # Если характеристика есть в категории, но у неё maxCount == 0 (WB запретил ввод)
+        # WB запрещает эту характеристику в characteristics; значение будет
+        # сохранено в описании карточки, чтобы оно не терялось при парсинге.
         if name_lower in all_cat_lookup and name_lower not in valid_cat_lookup:
             val_str = ", ".join(raw_val) if isinstance(raw_val, list) else str(raw_val)
             skipped_charcs.append({
@@ -179,7 +217,7 @@ def map_characteristics(donor_options: list[dict], category_charcs: list[dict]) 
 async def upload_card(product_info: dict, vendor_code: str) -> tuple[bool, str, list[dict]]:
     """
     Создает новую карточку товара в кабинете продавца через WB Content API v2.
-    Возвращает (успех, сообщение, пропущенные_характеристики).
+    Возвращает (успех, сообщение, перенесенные_в_описание_характеристики).
     """
     subject_id = product_info.get("subject_id", 105)
 
@@ -209,10 +247,15 @@ async def upload_card(product_info: dict, vendor_code: str) -> tuple[bool, str, 
             "skus": generated_barcodes[:1] if generated_barcodes else []
         }]
 
+    description = build_description_with_restricted_charcs(
+        product_info.get("description", "Описание товара"),
+        skipped_charcs
+    )
+
     variant_data = {
         "vendorCode": vendor_code,
         "title": product_info.get("name", "Товар")[:60],
-        "description": product_info.get("description", "Описание товара")[:5000],
+        "description": description,
         "brand": "",
         "dimensions": dimensions,
         "characteristics": mapped_charcs,
@@ -333,3 +376,4 @@ async def attach_photos_to_card(vendor_code: str, image_urls: list[str], status_
         return True, f"Загружено {uploaded_count} из {len(pics_to_upload)} фото!"
     else:
         return False, "Не удалось загрузить фотографии."
+
