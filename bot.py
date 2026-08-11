@@ -7,6 +7,8 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.exceptions import TelegramNetworkError, TelegramAPIError
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 
 from config import BOT_TOKEN, WB_SELLER_TOKEN
 from wb_parser import extract_article, fetch_wb_card
@@ -18,7 +20,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Инициализируем бота с кастомной сессией и авто-повторами при сбоях сети
+# Состояния FSM для запроса артикула характеристик
+class CharcState(StatesGroup):
+    waiting_for_article = State()
+
 session = AiohttpSession()
 bot = Bot(
     token=BOT_TOKEN,
@@ -36,7 +41,6 @@ async def safe_edit_text(message: types.Message, text: str, retries: int = 3):
             logger.warning(f"Сетевой сбой при редактировании сообщения (попытка #{attempt+1}): {e}")
             await asyncio.sleep(1.5)
         except TelegramAPIError as e:
-            # Игнорируем ошибку "текст сообщения не изменился"
             if "message is not modified" in str(e).lower():
                 return message
             logger.warning(f"Ошибка Telegram API: {e}")
@@ -64,13 +68,13 @@ async def cmd_start(message: types.Message):
     welcome_text = (
         "👋 <b>Привет! Я бот для автоматического создания карточек Wildberries.</b>\n\n"
         "📥 <b>Как использовать:</b>\n"
-        "Просто отправь мне ссылку на любой товар WB или его артикул.\n"
-        "Например: <code>https://www.wildberries.ru/catalog/12345678/detail.aspx</code>\n\n"
+        "1. Просто отправь мне ссылку на любой товар WB или его артикул — я создам карточку с фото в твоем кабинете.\n"
+        "2. Используй команду <b>/charcs</b> или <b>«Характеристики карточки»</b>, чтобы узнать все характеристики любого товара.\n\n"
         "⚙️ <b>Возможности:</b>\n"
         "• Генерирует короткий артикул продавца\n"
         "• Оставляет бренд пустым\n"
         "• Парсит все свойства и характеристики\n"
-        "• Добавляет 'Вес с упаковкой' в габариты товара\n"
+        "• Передает вес в габариты упаковки (`weightBrutto`)\n"
         "• Передает числовые параметры (charcType=4) строгими числами\n"
         "• Загружает до 30 оригинальных фотографий в высоком качестве"
     )
@@ -80,12 +84,104 @@ async def cmd_start(message: types.Message):
 async def cmd_help(message: types.Message):
     help_text = (
         "📖 <b>Инструкция:</b>\n"
-        "Отправьте ссылку на товар WB. Бот скопирует карточку с характеристиками и фотографиями в ваш кабинет."
+        "• Отправьте ссылку на товар WB для копирования в ваш кабинет.\n"
+        "• Напишите <code>/charcs [артикул]</code> или команду <b>«Характеристики карточки»</b> для просмотра списка характеристик."
     )
     await safe_reply(message, help_text)
 
+async def show_card_characteristics(message: types.Message, text_with_art: str, status_msg: types.Message | None = None):
+    """Извлекает артикул и отображает подробные характеристики товара."""
+    article = extract_article(text_with_art)
+    if not article:
+        msg_text = "⚠️ Не удалось распознать артикул. Отправьте ссылку или 8-10 цифр артикула WB."
+        if status_msg:
+            await safe_edit_text(status_msg, msg_text)
+        else:
+            await safe_reply(message, msg_text)
+        return
+
+    if not status_msg:
+        status_msg = await safe_reply(message, f"🔎 <b>Запрашиваю характеристики товара <code>{article}</code>...</b>")
+
+    prod = await fetch_wb_card(article)
+    if not prod:
+        await safe_edit_text(status_msg, f"❌ <b>Не удалось найти характеристики для товара {article}.</b>")
+        return
+
+    title = prod.get("name", "Товар WB")
+    subj_name = prod.get("subj_name", "Категория не определена")
+    options = prod.get("options", [])
+
+    options_text_list = []
+    for opt in options:
+        name = opt.get("name", "").strip()
+        val = opt.get("value", "")
+        if not name or val is None:
+            continue
+        val_str = ", ".join(val) if isinstance(val, list) else str(val)
+        options_text_list.append(f"  • <b>{name}:</b> {val_str}")
+
+    options_block = "\n".join(options_text_list) if options_text_list else "<i>Характеристики не найдены.</i>"
+
+    report = (
+        f"📋 <b>Характеристики товара (Артикул WB: <code>{article}</code>)</b>\n\n"
+        f"• <b>Название:</b> {title}\n"
+        f"• <b>Категория:</b> {subj_name}\n"
+        f"• <b>Всего характеристик:</b> {len(options_text_list)} шт.\n\n"
+        f"🛠 <b>Детальный список характеристик:</b>\n"
+        f"{options_block}"
+    )
+
+    # Если сообщение слишком длинное (лимит Telegram 4096 символов), разбиваем на части
+    if len(report) > 4000:
+        header = (
+            f"📋 <b>Характеристики товара (Артикул WB: <code>{article}</code>)</b>\n\n"
+            f"• <b>Название:</b> {title}\n"
+            f"• <b>Категория:</b> {subj_name}\n"
+            f"• <b>Всего характеристик:</b> {len(options_text_list)} шт.\n\n"
+            f"🛠 <b>Часть 1:</b>"
+        )
+        await safe_edit_text(status_msg, header)
+        chunk = ""
+        for line in options_text_list:
+            if len(chunk) + len(line) > 3800:
+                await safe_reply(message, chunk)
+                chunk = line + "\n"
+            else:
+                chunk += line + "\n"
+        if chunk:
+            await safe_reply(message, chunk)
+    else:
+        await safe_edit_text(status_msg, report)
+
+# Хэндлер команды просмотров характеристик /charcs и текстовой «Характеристики карточки»
+@dp.message(Command("charcs", "characteristics"))
+@dp.message(F.text.ilike("Характеристики карточки%") | F.text.ilike("Характеристики%") | F.text.ilike("/Характеристики_карточки%"))
+async def cmd_charcs(message: types.Message, state: FSMContext):
+    text = message.text.strip()
+    article = extract_article(text)
+
+    if article:
+        await state.clear()
+        await show_card_characteristics(message, text)
+    else:
+        await state.set_state(CharcState.waiting_for_article)
+        await safe_reply(
+            message,
+            "📥 <b>Пожалуйста, отправьте артикул или ссылку на товар WB</b>, чтобы посмотреть все его характеристики:"
+        )
+
+# Хэндлер ввода артикула в состоянии waiting_for_article
+@dp.message(CharcState.waiting_for_article)
+async def process_charc_article(message: types.Message, state: FSMContext):
+    text = message.text.strip()
+    await state.clear()
+    await show_card_characteristics(message, text)
+
+# Основной хэндлер для создания карточки при отправке ссылок/артикулов
 @dp.message(F.text)
-async def process_wb_link(message: types.Message):
+async def process_wb_link(message: types.Message, state: FSMContext):
+    await state.clear()
     text = message.text.strip()
     logger.info(f"Получено сообщение в Telegram: '{text}'")
 
@@ -140,7 +236,7 @@ async def process_wb_link(message: types.Message):
         await safe_edit_text(status_msg, f"❌ <b>Ошибка при создании карточки:</b>\n<code>{result_msg}</code>")
         return
 
-    # Callback функция обновления текста с устойчивостью к сбоям сети
+    # Callback функция обновления текста
     async def update_status_text(new_text: str):
         await safe_edit_text(status_msg, new_text)
 
@@ -183,7 +279,7 @@ async def process_wb_link(message: types.Message):
     await safe_edit_text(status_msg, final_report)
 
 async def main():
-    logger.info("Бот запускается с авто-повторами при сетевых сбоях...")
+    logger.info("Бот запускается с поддержкой команды /charcs и просмотра характеристик...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
