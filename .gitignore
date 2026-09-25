@@ -11,3 +11,6 @@ __pycache__/
 .vscode/
 venv/
 env/
+
+# Скачанные фото и видео товаров (/media)
+downloads/

@@ -8,6 +8,7 @@ from aiogram.client.default import DefaultBotProperties
 from config import BOT_TOKEN, WB_SELLER_TOKEN
 from wb_parser import extract_article, fetch_wb_card
 from wb_api import upload_card, attach_photos_to_card, generate_short_vendor_code
+from wb_media import download_product_media
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,7 +34,8 @@ async def cmd_start(message: types.Message):
         "• Оставляет бренд пустым\n"
         "• Парсит все свойства и характеристики\n"
         "• Сохраняет заблокированные API WB характеристики (maxCount=0) в описании\n"
-        "• Загружает до 30 оригинальных фотографий в высоком качестве"
+        "• Загружает до 30 оригинальных фотографий в высоком качестве\n"
+        "• <b>/media</b> <i>ссылка или артикул</i> — скачивает все фото и видео товара в отдельную папку"
     )
     await message.answer(welcome_text)
 
@@ -41,9 +43,57 @@ async def cmd_start(message: types.Message):
 async def cmd_help(message: types.Message):
     help_text = (
         "📖 <b>Инструкция:</b>\n"
-        "Отправьте ссылку на товар WB. Бот скопирует карточку с характеристиками и фотографиями в ваш кабинет."
+        "• Отправьте ссылку на товар WB. Бот скопирует карточку с характеристиками и фотографиями в ваш кабинет.\n"
+        "• <code>/media [ссылка или артикул]</code> — скачать все фото и видео товара в папку <code>downloads/&lt;артикул&gt;</code>."
     )
     await message.answer(help_text)
+
+@dp.message(Command("media"))
+async def cmd_media(message: types.Message):
+    article = extract_article(message.text or "")
+    if not article:
+        await message.answer(
+            "⚠️ Укажите товар после команды, например:\n"
+            "<code>/media https://www.wildberries.ru/catalog/12345678/detail.aspx</code>\n"
+            "или <code>/media 12345678</code>"
+        )
+        return
+
+    status_msg = await message.answer(f"🔎 <b>Ищу фото и видео товара <code>{article}</code>...</b>")
+
+    async def update_status_text(new_text: str):
+        try:
+            await status_msg.edit_text(new_text)
+        except Exception:
+            pass
+
+    product_info = await fetch_wb_card(article)
+    if not product_info:
+        await status_msg.edit_text(f"❌ <b>Не удалось получить данные о товаре {article}.</b> Проверьте ссылку.")
+        return
+
+    folder, photos, video = await download_product_media(
+        article,
+        product_info.get("image_urls", []),
+        has_video=product_info.get("has_video", True),
+        status_callback=update_status_text
+    )
+
+    if video:
+        video_text = f"✅ {video.name}"
+    elif product_info.get("has_video"):
+        video_text = "⚠️ есть на WB, но скачать не удалось"
+    else:
+        video_text = "нет у товара"
+
+    await status_msg.edit_text(
+        f"📦 <b>Медиа товара скачаны!</b>\n\n"
+        f"• <b>Товар:</b> {product_info.get('name', 'Товар')}\n"
+        f"• <b>Артикул WB:</b> <code>{article}</code>\n"
+        f"• <b>Фото:</b> {len(photos)} из {len(product_info.get('image_urls', []))} шт.\n"
+        f"• <b>Видео:</b> {video_text}\n\n"
+        f"📁 <b>Папка:</b>\n<code>{folder}</code>"
+    )
 
 @dp.message(F.text)
 async def process_wb_link(message: types.Message):

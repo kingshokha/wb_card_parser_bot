@@ -164,6 +164,7 @@ async def fetch_wb_card(article: int) -> dict | None:
         product_info["grouped_options"] = grouped_options
         product_info["image_urls"] = image_urls
         product_info["pics_count"] = len(image_urls)
+        product_info["has_video"] = bool(card_data.get("media", {}).get("has_video"))
         product_info["price"] = 1000
 
         # Определяем subject_id
